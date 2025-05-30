@@ -1,0 +1,38 @@
+{
+  "pipelineName": "CoverLetterFormatterConfig",
+  "description": "Docxtemplater-based cover-letter template setup and usage instructions",
+  "formatter": {
+    "useTemplateEngine": "docxtemplater",
+    "templatePath": "server/templates/cover_letter_template.docx",
+    "cacheTemplateBuffer": true,
+    "maxFormattingConcurrency": 2,
+    "templatePlaceholders": [
+    
+      "HiringManagerOrTeamName",
+      "CompanyName",
+      "CompanyAddressLine1",
+      "CompanyAddressLine2",
+      "OpeningHookParagraph",
+      "AlignmentParagraph",
+      "LeadershipParagraph",
+      "ValueProp1Title",
+      "ValueProp1Details",
+      "ValueProp2Title",
+      "ValueProp2Details",
+      "ValueProp3Title",
+      "ValueProp3Details",
+      "ValueProp4Title",
+      "ValueProp4Details",
+      "PublicSectorInterestParagraph",
+      "ClosingParagraph"
+    ],
+    "templateInstructions": [
+      "Create a .docx file at server/templates/cover_letter_template.docx containing the following tags in the document body: {CandidateFullName}, {DegreesAndCertifications}, {Phone}, {Email}, {City}, {State}, {ZipCode}, {Date}, {HiringManagerOrTeamName}, {CompanyName}, {CompanyAddressLine1}, {CompanyAddressLine2}, {OpeningHookParagraph}, {AlignmentParagraph}, {LeadershipParagraph}, {ValueProp1Title}, {ValueProp1Details}, {ValueProp2Title}, {ValueProp2Details}, {ValueProp3Title}, {ValueProp3Details}, {ValueProp4Title}, {ValueProp4Details}, {PublicSectorInterestParagraph}, {ClosingParagraph}.",
+      "On app startup, load and cache the template with PizZip:",
+      "```js\nconst buffer = fs.readFileSync('server/templates/cover_letter_template.docx');\nconst templateZip = new PizZip(buffer);\n```",
+      "To render a cover letter, clone the cached zip and use Docxtemplater:",
+      "```js\nconst doc = new Docxtemplater(templateZip.clone(), { paragraphLoop: true, linebreaks: true });\ndoc.setData({ salutation: data.salutation, openingHookParagraph: data.openingHookParagraph, AlignmentParagraph: data.AlignmentParagraph, LeadershipParagraph: data.LeadershipParagraph, ValueProp1Title: data.ValueProp1Title, ValueProp1Details: data.ValueProp1Details, /* etc. */ ClosingParagraph: data.ClosingParagraph });\ndoc.render();\nconst outputBuffer = doc.getZip().generate({ type: 'nodebuffer' });\n```",
+      "Serve `outputBuffer` with headers:\n```js\nres.set({\n  'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',\n  'Content-Disposition': `attachment; filename=\"cover_letter_${id}.docx\"`\n});\nres.send(outputBuffer);\n```"
+    ]
+  }
+}

@@ -1,0 +1,205 @@
+I’ve validated the JSON schema—no trailing commas, all keys/strings properly quoted, and the structure matches Replit’s expected pipeline format. You can drop this straight into your Replit app’s config:
+
+```json
+{
+  "pipelineName": "CoverLetterGenerationFlow",
+  "description": "Multi-agent pipeline to generate ATS-optimized, style-guided cover letters using Claude.ai; prompts for your Claude API key at startup.",
+  "credentials": [
+    {
+      "name": "CLAUDE_API_KEY",
+      "prompt": "Please enter your Claude.ai API key:",
+      "envVar": "CLAUDE_API_KEY",
+      "required": true
+    }
+  ],
+  "parameters": {
+    "qualityThreshold": 0.95,
+    "maxRefinementIterations": 5,
+    "db": {
+      "styleGuidesCollection": "CoverLetterStyles",
+      "resumeCollection": "ApplicantResumes",
+      "historyCollection": "SuccessfulCoverLetters"
+    }
+  },
+  "agents": [
+    {
+      "id": "Initialization",
+      "type": "orchestrator",
+      "actions": [
+        {
+          "action": "uploadToDB",
+          "inputs": ["CoverLetter_2025_Stylesheet.docx", "Spears_Collin_Resume.docx"],
+          "targetCollection": ["CoverLetterStyles", "ApplicantResumes"]
+        },
+        {
+          "action": "receiveJobDescription",
+          "source": "UI",
+          "field": "jobDescription"
+        },
+        {
+          "action": "extractATSKeywords",
+          "inputs": ["jobDescription"],
+          "output": "atsKeywords"
+        },
+        {
+          "action": "extractKeyRequirements",
+          "inputs": ["jobDescription"],
+          "output": "keyRequirements"
+        }
+      ]
+    },
+    {
+      "id": "TemplateAndStyleLoader",
+      "type": "dataLoader",
+      "actions": [
+        {
+          "action": "fetchTemplateStructure",
+          "inputs": ["CoverLetterStyles"],
+          "output": "templateStructure"
+        },
+        {
+          "action": "initializePlaceholders",
+          "inputs": ["templateStructure"],
+          "placeholders": ["Salutation", "OpeningHook", "KeyRequirementsAlignment", "ValueProps", "Closing"]
+        }
+      ]
+    },
+    {
+      "id": "DraftWriter",
+      "type": "LLM",
+      "model": "claude-2",
+      "apiKeyEnvVar": "CLAUDE_API_KEY",
+      "actions": [
+        {
+          "action": "mapAccomplishmentsToRequirements",
+          "inputs": ["ApplicantResumes", "keyRequirements"],
+          "output": "matchedAccomplishments"
+        },
+        {
+          "action": "generateInitialDraft",
+          "inputs": ["templateStructure", "matchedAccomplishments", "atsKeywords", "keyRequirements"],
+          "rules": ["useLeadershipTone", "quantifyAchievements", "adhereToStyleGuide"],
+          "output": "draftJSON"
+        }
+      ]
+    },
+    {
+      "id": "ContentNormalization",
+      "type": "processor",
+      "actions": [
+        {
+          "action": "flattenLists",
+          "inputs": ["draftJSON"]
+        },
+        {
+          "action": "removeHyperlinks",
+          "inputs": ["draftJSON"]
+        },
+        {
+          "action": "ensureActiveVoice",
+          "inputs": ["draftJSON"]
+        }
+      ]
+    },
+    {
+      "id": "SectionReviewLoop",
+      "type": "loop",
+      "inputs": ["draftJSON"],
+      "loopOver": "sections",
+      "stopCondition": "Judge.passed",
+      "steps": [
+        {
+          "id": "Critic",
+          "type": "LLM",
+          "model": "claude-2",
+          "apiKeyEnvVar": "CLAUDE_API_KEY",
+          "actions": [
+            {
+              "action": "scoreSection",
+              "criteria": ["styleCompliance", "atsKeywordUse", "clarity", "impact"],
+              "output": "sectionScore"
+            }
+          ]
+        },
+        {
+          "id": "Judge",
+          "type": "ruleEngine",
+          "actions": [
+            {
+              "action": "evaluatePassFail",
+              "inputs": ["sectionScore", "qualityThreshold"],
+              "onFail": "triggerRefinement"
+            }
+          ]
+        },
+        {
+          "id": "Refiner",
+          "type": "LLM",
+          "model": "claude-2",
+          "apiKeyEnvVar": "CLAUDE_API_KEY",
+          "actions": [
+            {
+              "action": "refineSection",
+              "inputs": ["currentSectionContent", "Critic.feedback"],
+              "preserveOriginal": true,
+              "iterateUntil": "sectionScore >= qualityThreshold",
+              "maxIterations": "maxRefinementIterations"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "FinalQualityCheck",
+      "type": "LLM",
+      "model": "claude-2",
+      "apiKeyEnvVar": "CLAUDE_API_KEY",
+      "actions": [
+        {
+          "action": "aggregateScores",
+          "inputs": ["allSectionScores"],
+          "output": "overallScore"
+        },
+        {
+          "action": "validateOverall",
+          "inputs": ["overallScore", "qualityThreshold"]
+        }
+      ]
+    },
+    {
+      "id": "Formatter",
+      "type": "documentFormatter",
+      "actions": [
+        {
+          "action": "mergeDraftIntoTemplate",
+          "inputs": ["templateStructure", "draftJSON"]
+        },
+        {
+          "action": "export",
+          "formats": ["docx", "gdoc"]
+        }
+      ]
+    },
+    {
+      "id": "StyleLearner",
+      "type": "feedbackLearner",
+      "trigger": {
+        "event": "FinalQualityCheck.passed",
+        "condition": "overallScore >= qualityThreshold"
+      },
+      "actions": [
+        {
+          "action": "saveToDB",
+          "inputs": ["formattedDocument"],
+          "targetCollection": "SuccessfulCoverLetters"
+        },
+        {
+          "action": "updateStyleReferences",
+          "inputs": ["formattedDocument"],
+          "targetCollection": "CoverLetterStyles"
+        }
+      ]
+    }
+  ]
+}
+```

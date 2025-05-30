@@ -1,0 +1,113 @@
+{
+  "pipelineName": "CoverLetterGenerationFlow",
+  "description": "Cover-letter generation optimized using lessons from FedRAMP PRD pipeline",
+
+  /* 4. Cache heavy work */
+  "caching": {
+    "styleGuideAnalysis": {
+      "enabled": true,
+      "collection": "StyleGuideAnalysisCache"
+    },
+    "resumeEmbeddings": {
+      "enabled": true,
+      "model": "openai-embedding-ada-002",
+      "collection": "ResumeEmbeddings"
+    }
+  },
+
+  /* 5. Parallelize independent tasks */
+  "parallelExecution": {
+    "enabled": true,
+    "maxConcurrency": 5,
+    "groups": [
+      ["extractATSKeywords", "extractKeyRequirements", "documentAnalysis"],
+      ["mapAccomplishmentsToRequirements"],
+      [
+        "generateOpeningHook",
+        "generateAlignmentParagraph",
+        "generateWhyCompanySentence",
+        "generateLeadershipParagraph",
+        "generateValueProps",
+        "generatePublicSectorInterestParagraph",
+        "generateClosingParagraph"
+      ]
+    ]
+  },
+
+  /* 2. Stream & batch */
+  "batchScoring": {
+    "enabled": true,
+    "agentId": "sectionReviewLoop",
+    "sectionsPerBatch": 3
+  },
+
+  "aiConfig": {
+    "extractATSKeywords": {
+      "provider": "claude",
+      "model": "claude-instant",
+      "apiKeyEnvVar": "CLAUDE_API_KEY",
+      "promptTemplate": "Extract ATS keywords from the job description and return a JSON object: {\\"keywords\\":[...]} with no markdown."
+    },
+    "extractKeyRequirements": {
+      "provider": "claude",
+      "model": "claude-instant",
+      "apiKeyEnvVar": "CLAUDE_API_KEY",
+      "promptTemplate": "Identify and list the key job requirements from the job description as JSON: {\\"requirements\\":[...]} with no markdown."
+    },
+    "mapAccomplishmentsToRequirements": {
+      "provider": "openai",
+      "model": "gpt-3.5-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Match resume accomplishments to the key requirements. Output JSON: {\\"matches\\":[{\\"requirement\\":...,\\"accomplishment\\":...},...]}."
+    },
+    "generateOpeningHook": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Write a concise, compelling opening hook paragraph for the cover letter based on resume and job description."
+    },
+    "generateAlignmentParagraph": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Generate a paragraph explaining how your past accomplishments directly meet the job requirements."
+    },
+    "generateWhyCompanySentence": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Write one sentence on why you want to work at the company, showing research into their mission or values."
+    },
+    "generateLeadershipParagraph": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Write a paragraph describing your leadership experience, strategies, and measurable outcomes."
+    },
+    "generateValueProps": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Produce five bullet-point value props in '**Title:** Details' format, grouping similar achievements together for efficiency."
+    },
+    "generatePublicSectorInterestParagraph": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Optionally write a short paragraph expressing interest in sector-specific challenges if relevant."
+    },
+    "generateClosingParagraph": {
+      "provider": "openai",
+      "model": "gpt-4-turbo",
+      "apiKeyEnvVar": "OPENAI_API_KEY",
+      "promptTemplate": "Write a closing paragraph restating enthusiasm, mentioning availability, and inviting next steps."
+    }
+  },
+
+  /* 7. Template-driven merging */
+  "formatter": {
+    "useTemplateEngine": "docxtemplater",
+    "templatePath": "server/templates/cover_letter_template.docx",
+    "cacheTemplateBuffer": true
+  }
+}

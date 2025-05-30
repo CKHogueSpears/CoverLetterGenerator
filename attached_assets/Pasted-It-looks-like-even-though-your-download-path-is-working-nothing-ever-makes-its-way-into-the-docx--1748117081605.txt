@@ -1,0 +1,80 @@
+It looks like even though your download path is working, nothing ever makes its way into the `.docx` buffer. Let’s instrument and fix your `createDocxFromContent` so you can see exactly what’s happening—and ensure you actually build out paragraphs before calling the docx packer.
+
+---
+
+### 1. Add debug logging of the buffer length
+
+In **`server/documentProcessor.ts`**, around your doc‐generation function, sprinkle in a console log so you can confirm whether anything’s in the buffer:
+
+```ts
+import { Document, Packer, Paragraph } from "docx";
+
+export async function createDocxFromContent(content: string): Promise<Buffer> {
+  const doc = new Document();
+
+  // Split on double‐newline to get paragraphs
+  const paragraphs = content.split(/\n{2,}/g).filter(p => p.trim());
+  paragraphs.forEach(text => {
+    doc.addSection({
+      children: [ new Paragraph(text) ]
+    });
+  });
+
+  // Now pack it
+  const buffer = await Packer.toBuffer(doc);
+
+  // 🛠️ DEBUG: log buffer size
+  console.log("📄 createDocxFromContent: generated buffer size =", buffer.length);
+
+  return buffer;
+}
+```
+
+* If you see `buffer.length === 0` in your logs, that means `paragraphs` was empty—i.e. `content` was blank when it reached here.
+* If `paragraphs` is non-empty but the buffer is still zero, something’s off with the docx build itself.
+
+---
+
+### 2. Verify the incoming “content” isn’t empty
+
+Right before you call `createDocxFromContent`, log the raw string you’re passing in:
+
+```ts
+// In your download route, just before generate:
+console.log("🖋️ CoverLetter content:", JSON.stringify(coverLetterContent).slice(0,200), "…");
+const buffer = await createDocxFromContent(coverLetterContent);
+```
+
+* If this prints an empty string (`""`) or only whitespace, then the issue is upstream—your pipeline never populated `coverLetterContent`.
+* If it prints actual text, but you still get a zero-byte buffer, the problem is in the docx packer step.
+
+---
+
+### 3. Ensure you’re *awaiting* Packer.toBuffer
+
+Double-check you have `await Packer.toBuffer(doc)` (and that your function is `async`). Forgetting the `await` will return a pending Promise instead of a Buffer.
+
+---
+
+### 4. Test locally and watch the logs
+
+1. Trigger cover letter generation for #6 or #8.
+
+2. Observe your console logs for:
+
+   * “CoverLetter content:” (should show your letter text)
+   * “generated buffer size =” (should be >1,000 bytes for a multi-paragraph letter)
+
+3. If both look good but you still get a blank download, confirm your Express route is doing:
+
+   ```ts
+   res.set({
+     "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+     "Content-Disposition": `attachment; filename="cover_letter_${id}.docx"`,
+   });
+   res.send(buffer);
+   ```
+
+---
+
+Once you see a non-zero buffer in your logs, the download will contain a valid `.docx`. If you still see `0`, the problem is content is blank or Packer isn’t seeing any paragraphs—trace backward to find where the pipeline’s final draft JSON is being converted into that `coverLetterContent` string.

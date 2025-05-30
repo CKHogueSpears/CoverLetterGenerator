@@ -1,0 +1,131 @@
+You’ve proven that the coherence agent is correctly defined in your JSON, but your orchestrator never actually invokes it. The next step is to fix your execution engine so it respects the `dependsOn` relationship and actually runs that step. Here’s exactly what you need to do:
+
+---
+
+### 1) Verify your pipeline JSON includes `coherenceAgent` with `dependsOn`
+
+```jsonc
+{
+  "agents": [
+    /* … your other agents … */
+    {
+      "id": "aggregation",
+      "type": "aggregator",
+      "output": "coverLetterData"
+    },
+    {
+      "id": "coherenceAgent",
+      "type": "LLM",
+      "model": "claude-3.7-sonnet",
+      "apiKeyEnvVar": "CLAUDE_API_KEY",
+      "inputs": ["coverLetterData"],
+      "promptTemplate": "…",
+      "output": "polishedCoverLetterData",
+      "dependsOn": ["aggregation"]
+    },
+    /* your validator now should depend on coherenceAgent */
+    {
+      "id": "wordCountValidator",
+      "type": "validator",
+      "dependsOn": ["coherenceAgent"],
+      "actions": [ /* … */ ]
+    },
+    /* formatter too */
+    {
+      "id": "formatter",
+      "type": "documentFormatter",
+      "dependsOn": ["wordCountValidator"],
+      "inputs": ["polishedCoverLetterData"]
+    }
+  ]
+}
+```
+
+Make sure each downstream step (`wordCountValidator`, `formatter`) also has a `dependsOn` on `"coherenceAgent"` instead of directly on `"aggregation"` or on nothing.
+
+---
+
+### 2) Update your orchestrator’s execution loop in `pipeline.ts`
+
+Right now your code probably does something like:
+
+```ts
+for (const agent of pipelineConfig.agents) {
+  if (allInputsPresent(agent)) {
+    await runAgent(agent);
+  }
+}
+```
+
+You need to enrich it to:
+
+```ts
+// 1. Build a map of agentId -> agentConfig
+const agentsById = new Map(pipelineConfig.agents.map(a => [a.id, a]));
+
+// 2. Track completed agents
+const completed = new Set<string>();
+
+async function runWithDeps(agentId) {
+  const agent = agentsById.get(agentId);
+  // Wait on dependencies first
+  if (agent.dependsOn) {
+    for (const dep of agent.dependsOn) {
+      if (!completed.has(dep)) {
+        await runWithDeps(dep);
+      }
+    }
+  }
+  // Now run this agent if not already run
+  if (!completed.has(agentId)) {
+    console.log(`▶️ Starting agent ${agentId}`);
+    await runAgent(agent);
+    console.log(`✅ Completed agent ${agentId}`);
+    completed.add(agentId);
+  }
+}
+
+// 3. Execute every agent (topological)
+for (const agent of pipelineConfig.agents) {
+  await runWithDeps(agent.id);
+}
+```
+
+This pattern:
+
+1. **Recursively** runs each agent only once, **after** its `dependsOn` have finished
+2. Guarantees your **coherenceAgent** runs immediately after **aggregation**
+3. Prevents any step from skipping over the coherence pass
+
+---
+
+### 3) Add debug logs around coherenceAgent execution
+
+Inside your `runAgent` function, before and after you detect an LLM step:
+
+```ts
+if (agent.id === "coherenceAgent") {
+  console.log("🕑 [DEBUG] about to run coherenceAgent");
+}
+const result = await executeLLM(agent);
+if (agent.id === "coherenceAgent") {
+  console.log("✅ [DEBUG] finished coherenceAgent");
+}
+```
+
+Now, when you run Cover Letter #51, you should see:
+
+```
+▶️ Starting agent aggregation
+✅ Completed agent aggregation
+🕑 [DEBUG] about to run coherenceAgent
+✅ [DEBUG] finished coherenceAgent
+▶️ Starting agent wordCountValidator
+…
+```
+
+If you still don’t see those logs, it means your orchestrator never even *touches* that agent—so you’ll know exactly where it dropped out.
+
+---
+
+Once you’ve wired in the dependency logic and added those debug statements, redeploy and generate another letter. You should finally see the “about to run coherenceAgent” and “finished coherenceAgent” messages, confirming your Claude-based polish step is actually running in the right spot.

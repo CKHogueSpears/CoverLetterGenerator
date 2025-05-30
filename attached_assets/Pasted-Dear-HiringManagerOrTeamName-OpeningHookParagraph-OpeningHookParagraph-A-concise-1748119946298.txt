@@ -1,0 +1,38 @@
+Dear {HiringManagerOrTeamName},  
+
+{OpeningHookParagraph}  
+*<!-- OpeningHookParagraph: A concise, compelling introduction highlighting your enthusiasm for the role and summarizing a key strength relevant to the position. -->*  
+
+{AlignmentParagraph}  
+*<!-- AlignmentParagraph: Describe how your specific past accomplishments (with quantifiable metrics) directly meet the core job requirements. -->*  
+
+{WhyCompanySentence}  
+*<!-- WhyCompanySentence: One sentence explaining why you want to work at {CompanyName}, demonstrating research into their mission or values. -->*  
+
+{LeadershipParagraph}  
+*<!-- LeadershipParagraph: Illustrate your leadership experience—how you led teams or projects, the strategies you used, and the measurable outcomes. -->*  
+
+**I can immediately add value by:**  
+- **{ValueProp1Title}:** {ValueProp1Details}  
+  *<!-- ValueProp1: Title summarizes the proposition; Details explain your action and impact with data. -->*  
+- **{ValueProp2Title}:** {ValueProp2Details}  
+  *<!-- ValueProp2: Demonstrate another key achievement aligned to the role’s needs. -->*  
+- **{ValueProp3Title}:** {ValueProp3Details}  
+  *<!-- ValueProp3: Provide a third example showcasing relevant skills and results. -->*  
+- **{ValueProp4Title}:** {ValueProp4Details}  
+  *<!-- ValueProp4: Highlight a fourth accomplishment that underscores your expertise. -->*  
+- **{ValueProp5Title}:** {ValueProp5Details}  
+  *<!-- ValueProp5: Link to a top company priority or initiative, showing direct applicability. -->*  
+
+{PublicSectorInterestParagraph}  
+*<!-- PublicSectorInterestParagraph: (Optional) Express interest in sector-specific challenges or projects if relevant. -->*  
+
+{ClosingParagraph}  
+*<!-- ClosingParagraph: Briefly restate your enthusiasm, mention availability, and invite next steps. -->*  
+
+Sincerely,  
+
+{CandidateFullName}  
+*<!-- CandidateFullName: Your full name for the signature block. -->*  
+
+*– Generated via CoverLetterGenerationFlow*

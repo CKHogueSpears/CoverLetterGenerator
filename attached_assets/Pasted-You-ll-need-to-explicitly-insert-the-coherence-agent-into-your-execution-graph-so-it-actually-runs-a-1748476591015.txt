@@ -1,0 +1,58 @@
+You’ll need to explicitly insert the coherence agent into your execution graph so it actually runs after aggregation and before validation. In practice that means two small changes to your pipeline JSON:
+
+1. **Give the coherence agent a `dependsOn`** so the orchestrator knows when to fire it.
+2. **Point the validator and formatter at its output** (`polishedCoverLetterData`) instead of the raw aggregation.
+
+Here’s a minimal patch (diff) you can apply to your Replit config:
+
+```diff-json
+ "agents": [
+   …,
+   {
+     "id": "aggregation",
+     "type": "aggregator",
+     "output": "coverLetterData",
+     …
+   },
++  {
++    "id": "coherenceAgent",
++    "type": "LLM",
++    "model": "claude-3.7-sonnet",
++    "apiKeyEnvVar": "CLAUDE_API_KEY",
++    "inputs": ["coverLetterData"],
++    "promptTemplate": "Take these sections and return a single cohesive cover letter JSON, smoothing transitions and removing repetition. Keep the same keys.",
++    "output": "polishedCoverLetterData",
++    "dependsOn": ["aggregation"]
++  },
+   {
+-    "id": "wordCountValidator",
++    "id": "wordCountValidator",
+     "type": "validator",
+     "actions": [
+       {
+-        "input": "coverLetterData",
++        "input": "polishedCoverLetterData",
+         "action": "validateWordCount",
+         "maxWords": 400
+       }
+     ],
+     "onFail": "trimExcess"
+   },
+   {
+-    "id": "formatter",
++    "id": "formatter",
+     "type": "documentFormatter",
+     "inputs": ["polishedCoverLetterData"],
+     …
+   }
+ ]
+```
+
+**Steps to apply:**
+
+1. Find your `"aggregation"` agent.
+2. Insert the `coherenceAgent` block **immediately after** it, with `"dependsOn": ["aggregation"]`.
+3. Update your validator’s `"input"` and your formatter’s `"inputs"` to reference `"polishedCoverLetterData"` instead of `"coverLetterData"`.
+4. Save & restart your Repl.
+
+That will force the coherence agent to actually run (you should see its “Starting coherence refinement” log), then feed its output into the word‐count check and final doc merge.

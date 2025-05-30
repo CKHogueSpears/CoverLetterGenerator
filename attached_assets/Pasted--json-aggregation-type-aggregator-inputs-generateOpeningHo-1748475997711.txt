@@ -1,0 +1,71 @@
+```json
+{
+  "aggregation": {
+    "type": "aggregator",
+    "inputs": [
+      "generateOpeningHook",
+      "generateAlignmentParagraph",
+      "generateWhyCompanySentence",
+      "generateLeadershipParagraph",
+      "generateValueProps",
+      "generatePublicSectorInterestParagraph",
+      "generateClosingParagraph"
+    ],
+    "mapping": {
+      "HiringManagerOrTeamName": "jobDescription.hiringManager",
+      "OpeningHookParagraph": "generateOpeningHook",
+      "AlignmentParagraph": "generateAlignmentParagraph",
+      "WhyCompanySentence": "generateWhyCompanySentence",
+      "LeadershipParagraph": "generateLeadershipParagraph",
+      "ValueProps": "generateValueProps",
+      "PublicSectorInterestParagraph": "generatePublicSectorInterestParagraph",
+      "ClosingParagraph": "generateClosingParagraph",
+      "CandidateFullName": "ApplicantResumes.fullName"
+    },
+    "output": "coverLetterData"
+  },
+
+  "coherenceAgent": {
+    "type": "LLM",
+    "model": "claude-3.7-sonnet",
+    "apiKeyEnvVar": "CLAUDE_API_KEY",
+    "inputs": ["coverLetterData"],
+    "promptTemplate": "Take these cover letter sections and produce a single cohesive document. Smooth transitions, remove repetition, maintain “WHO-WHAT-WHERE-WHEN-WHY-OUTCOME” for each accomplishment, preserve all fields. Return valid JSON with the same keys: {\"OpeningHookParagraph\":…, \"AlignmentParagraph\":…, …}.",
+    "output": "polishedCoverLetterData"
+  },
+
+  "validators": [
+    {
+      "id": "wordCountValidator",
+      "type": "validator",
+      "actions": [
+        {
+          "action": "validateWordCount",
+          "input": "polishedCoverLetterData",
+          "maxWords": 400
+        }
+      ],
+      "onFail": "trimExcess"
+    }
+  ],
+
+  "formatter": {
+    "useTemplateEngine": "docxtemplater",
+    "templatePath": "server/templates/cover_letter_template.docx",
+    "cacheTemplateBuffer": true,
+    "dataSource": "polishedCoverLetterData",
+    "verifyPlaceholders": true,
+    "placeholders": [
+      "HiringManagerOrTeamName",
+      "OpeningHookParagraph",
+      "AlignmentParagraph",
+      "WhyCompanySentence",
+      "LeadershipParagraph",
+      "ValueProps",
+      "PublicSectorInterestParagraph",
+      "ClosingParagraph",
+      "CandidateFullName"
+    ]
+  }
+}
+```
