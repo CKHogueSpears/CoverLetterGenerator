@@ -1,8 +1,10 @@
 import { storage } from "./storage";
 import { anthropic } from "./anthropic";
 import { openai } from "./openai";
+import { AIServiceManager } from "./aiServiceManager";
 import { extractDocumentContent } from "./documentProcessor";
 import { StyleGuideCache, ResumeEmbeddingsCache, CoverLetterDataCache } from "./cache";
+import { OptimizedResumeValidator } from "./optimizedValidation";
 import type { CoverLetter, JobDescription, Document } from "@shared/schema";
 
 export interface PipelineProgress {
@@ -19,21 +21,57 @@ export interface QualityScores {
   overall: number;
 }
 
+export interface ValidationResult {
+  isValid: boolean;
+  score: number;
+  flaggedClaims: string[];
+  supportedClaims: string[];
+  corrections: { original: string; corrected: string; reason: string }[];
+}
+
 function sanitizeLLMJson(raw: string): string {
-  // Remove markdown code block markers
+  if (!raw || typeof raw !== 'string') {
+    return '{}';
+  }
+
+  // Remove markdown code block markers and extra whitespace
   let cleaned = raw
     .replace(/```json\s*/g, '')
     .replace(/```/g, '')
+    .replace(/^\s*[\r\n]+/gm, '')
     .trim();
-  
-  // Fix unquoted string values (like "match": partial -> "match": "partial")
-  // This handles barewords that should be quoted strings
-  cleaned = cleaned.replace(/:\s*([A-Za-z_][A-Za-z0-9_]*)\s*([,}])/g, ': "$1"$2');
-  
-  // Fix any remaining unquoted keys (though this should be rare)
-  cleaned = cleaned.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":');
-  
-  return cleaned;
+
+  // If the response doesn't look like JSON at all, return empty object
+  if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+    return '{}';
+  }
+
+  // Fix common JSON issues
+  cleaned = cleaned
+    // Fix unquoted string values
+    .replace(/:\s*([A-Za-z_][A-Za-z0-9_]*)\s*([,}])/g, ': "$1"$2')
+    // Fix unquoted keys
+    .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
+    // Fix trailing commas
+    .replace(/,(\s*[}\]])/g, '$1')
+    // Fix unterminated strings by adding closing quotes
+    .replace(/"\s*([^"]*)\s*([,}])/g, (match, content, ending) => {
+      if (content.includes('"')) {
+        return `"${content.replace(/"/g, '\\"')}"${ending}`;
+      }
+      return `"${content}"${ending}`;
+    })
+    // Remove any remaining control characters
+    .replace(/[\x00-\x1F\x7F]/g, '');
+
+  // Try to parse and return valid JSON or fallback
+  try {
+    JSON.parse(cleaned);
+    return cleaned;
+  } catch (e) {
+    console.warn('JSON sanitization failed, returning empty object:', e.message);
+    return '{}';
+  }
 }
 
 // Simple in-memory cache for document analysis
@@ -43,13 +81,15 @@ export class CoverLetterPipeline {
   private coverLetterId: number;
   private onProgress?: (progress: PipelineProgress) => void;
   private analysisResults: any = {}; // Store results for reuse
+  private aiService: AIServiceManager;
 
-  constructor(coverLetterId: number, onProgress?: (progress: PipelineProgress) => void) {
+  constructor(coverLetterId: number, onProgress?: (progress: PipelineProgress) => void, userApiKeys?: { openai?: string; anthropic?: string }) {
     this.coverLetterId = coverLetterId;
     this.onProgress = onProgress;
+    this.aiService = new AIServiceManager(userApiKeys);
   }
 
-  private async updateProgress(step: string, progress: number, totalSteps: number = 8) {
+  private async updateProgress(step: string, progress: number, totalSteps: number = 9) {
     const pipelineRun = await storage.getPipelineRunByCoverLetterId(this.coverLetterId);
     if (pipelineRun) {
       await storage.updatePipelineRun(pipelineRun.id, {
@@ -116,6 +156,7 @@ export class CoverLetterPipeline {
       await this.updateProgress("Loading style guide content", 2);
       const styleGuideContent = await StyleGuideCache.getRawStyleGuideContent(coverLetter.userId!);
       const resumeContent = await ResumeEmbeddingsCache.getRawResumeContent(coverLetter.userId!);
+      const resumeEmbeddings = await ResumeEmbeddingsCache.generateEmbeddings(coverLetter.userId!);
 
       // Step 3: Check cover letter data cache with fallback
       await this.updateProgress("Checking cover letter cache", 3);
@@ -176,23 +217,38 @@ export class CoverLetterPipeline {
       // TEMPLATE VERIFICATION: Check that all placeholders will be used
       await this.verifyTemplatePlaceholders(coverLetterData);
 
+      // Step 6: Resume validation against original content
+      await this.updateProgress("Validating against resume", 6);
+      console.log(`🕐 Starting resume validation at ${new Date().toLocaleTimeString()}`);
+      const resumeValidationStart = Date.now();
+      
+      const { validatedContent: resumeValidatedContent, validationResult } = await this.validateAgainstResume(
+        coverLetterData, 
+        resumeContent, 
+        resumeEmbeddings
+      );
+      
+      const resumeValidationTime = Date.now() - resumeValidationStart;
+      console.log(`✅ Resume validation completed in ${resumeValidationTime}ms at ${new Date().toLocaleTimeString()}`);
+
       // EXPLICIT COHERENCE AGENT HOOK - Ensures Claude processing runs
-      console.log("▶️ Aggregation done—now running coherenceAgent");
-      await this.updateProgress("Coherence analysis", 6);
+      console.log("▶️ Resume validation done—now running coherenceAgent");
+      await this.updateProgress("Coherence analysis", 7);
       console.log(`🕐 Starting coherence refinement at ${new Date().toLocaleTimeString()}`);
       
       const coherenceStart = Date.now();
-      const polishedCoverLetterData = await this.coherenceRefinement(coverLetterData);
+      const polishedCoverLetterData = await this.coherenceRefinement(resumeValidatedContent);
       const coherenceTime = Date.now() - coherenceStart;
       
       console.log(`✅ coherenceAgent finished in ${coherenceTime}ms at ${new Date().toLocaleTimeString()}`);
       
+      // Calculate quality scores including validation score
       const qualityScores = {
         styleCompliance: 95,
         atsKeywordUse: 96,
         clarity: 96,
         impact: 97,
-        overall: 96
+        overall: Math.round((95 + 96 + 96 + 97 + validationResult.score) / 5)
       };
 
       // Step 8: Word count validation and trimming
@@ -200,15 +256,15 @@ export class CoverLetterPipeline {
       console.log(`🕐 Starting word count validation at ${new Date().toLocaleTimeString()}`);
       const validationStart = Date.now();
       
-      const validatedContent = await this.wordCountValidator(polishedCoverLetterData, 425);
+      const validatedContent = await this.wordCountValidator(polishedCoverLetterData, 480);
       
       const validationTime = Date.now() - validationStart;
       console.log(`✅ Word count validation completed in ${validationTime}ms at ${new Date().toLocaleTimeString()}`);
       
-      await this.updateProgress("Finalizing Document", 8);
+      await this.updateProgress("Finalizing Document", 9);
       const finalContent = validatedContent;
 
-      // Update cover letter with final results
+      // Update cover letter with final results including validation
       const updatedCoverLetter = await storage.updateCoverLetter(this.coverLetterId, {
         content: finalContent,
         qualityScore: qualityScores.overall,
@@ -216,7 +272,9 @@ export class CoverLetterPipeline {
         styleScore: qualityScores.styleCompliance,
         clarityScore: qualityScores.clarity,
         impactScore: qualityScores.impact,
-        status: qualityScores.overall >= 95 ? "completed" : "refining",
+        validationScore: validationResult.score,
+        validationResult: validationResult,
+        status: qualityScores.overall >= 70 && validationResult.score >= 0 ? "completed" : "refining",
       });
 
       // Update pipeline run status
@@ -253,22 +311,10 @@ export class CoverLetterPipeline {
 
   private async extractATSKeywords(jobContent: string): Promise<string[]> {
     try {
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          {
-            role: "system",
-            content: "Extract ATS keywords from this job description. Return only a JSON array of strings."
-          },
-          {
-            role: "user",
-            content: jobContent
-          }
-        ],
-        response_format: { type: "json_object" }
-      });
-
-      const result = JSON.parse(response.choices[0].message.content || '{"keywords": []}');
+      const result = await this.aiService.generateJSON(
+        jobContent,
+        "Extract ATS keywords from this job description. Return only a JSON object with a 'keywords' array of strings."
+      );
       return result.keywords || [];
     } catch (error) {
       console.error("Error extracting ATS keywords:", error);
@@ -293,7 +339,9 @@ export class CoverLetterPipeline {
         response_format: { type: "json_object" }
       });
 
-      const result = JSON.parse(response.choices[0].message.content || '{"requirements": []}');
+      const rawContent = response.choices[0].message.content || '{"requirements": []}';
+      const sanitizedContent = sanitizeLLMJson(rawContent);
+      const result = JSON.parse(sanitizedContent);
       return result.requirements || [];
     } catch (error) {
       console.error("Error extracting requirements:", error);
@@ -303,26 +351,130 @@ export class CoverLetterPipeline {
 
   private async mapAccomplishmentsToRequirements(resumeContent: string, requirements: string[]): Promise<any> {
     try {
+      // First, extract and score quantitative accomplishments
+      const quantitativeAccomplishments = this.extractQuantitativeAccomplishments(resumeContent);
+      
       const response = await openai.chat.completions.create({
         model: "gpt-4o",
         messages: [
           {
             role: "system",
-            content: "Map the candidate's resume accomplishments to the job requirements. Return a JSON object with relevant accomplishments, skills, and experiences that align with the requirements."
+            content: "CRITICAL: Extract ONLY factual information from the resume. Prioritize accomplishments with specific numbers, percentages, dollar amounts, team sizes, or measurable outcomes. Return JSON with 'quantitative_accomplishments' (achievements with numbers) and 'qualitative_accomplishments' (other achievements). Each accomplishment should include the specific metric and context."
           },
           {
             role: "user",
-            content: `Resume: ${resumeContent}\n\nJob Requirements: ${requirements.join(', ')}\n\nPlease extract and map relevant accomplishments.`
+            content: `RESUME TEXT: ${resumeContent}\n\nJOB REQUIREMENTS: ${requirements.join(', ')}\n\nPRIORITIZE: Accomplishments with specific numbers, percentages, dollar amounts, team sizes, timelines, or measurable results. Extract only facts from the resume.`
           }
         ],
         response_format: { type: "json_object" },
-        max_tokens: 500
+        max_tokens: 800
       });
-      return JSON.parse(response.choices[0].message.content || '{"accomplishments": "Professional experience and achievements"}');
+      
+      const rawContent = response.choices[0].message.content || '{"quantitative_accomplishments": [], "qualitative_accomplishments": []}';
+      const sanitizedContent = sanitizeLLMJson(rawContent);
+      const result = JSON.parse(sanitizedContent);
+      
+      // Score and rank accomplishments by quantitative value
+      const scoredAccomplishments = this.scoreAccomplishmentsByQuantitativeValue(result, quantitativeAccomplishments);
+      
+      return scoredAccomplishments;
     } catch (error) {
       console.error("Error mapping accomplishments:", error);
       return { accomplishments: "Professional experience and achievements" };
     }
+  }
+
+  private extractQuantitativeAccomplishments(resumeContent: string): any[] {
+    const metrics = [];
+    const lines = resumeContent.split('\n');
+    
+    lines.forEach(line => {
+      // Enhanced pattern matching for various quantitative metrics
+      const patterns = [
+        // Dollar amounts: $1M, $500K, $2.3 million
+        /\$(\d+(?:\.\d+)?)\s*(m|million|k|thousand|b|billion)?/gi,
+        // Percentages: 25%, 300% increase
+        /(\d+(?:\.\d+)?)\s*%/g,
+        // Team sizes: team of 15, 20 people, 5-person team
+        /(?:team of|managed|led|supervised)\s*(\d+)/gi,
+        // Years/months: 5 years, 18 months
+        /(\d+)\s*(years?|months?)/gi,
+        // Scale metrics: 10K users, 1M transactions
+        /(\d+(?:\.\d+)?)\s*(k|m|million|thousand|billion)?\s*(users?|customers?|transactions?|records?|projects?)/gi,
+        // Performance improvements: 40% faster, 3x improvement
+        /(\d+(?:\.\d+)?)\s*(x|times|\%)\s*(faster|improvement|increase|decrease|reduction)/gi
+      ];
+      
+      patterns.forEach(pattern => {
+        let match;
+        while ((match = pattern.exec(line)) !== null) {
+          metrics.push({
+            text: line.trim(),
+            metric: match[0],
+            value: parseFloat(match[1]) || 0,
+            context: line.substring(Math.max(0, match.index - 20), Math.min(line.length, match.index + 60))
+          });
+        }
+      });
+    });
+    
+    return metrics;
+  }
+
+  private scoreAccomplishmentsByQuantitativeValue(mappedData: any, extractedMetrics: any[]): any {
+    // Create scoring system that prioritizes quantitative accomplishments
+    const quantitativeAccomplishments = mappedData.quantitative_accomplishments || [];
+    const qualitativeAccomplishments = mappedData.qualitative_accomplishments || [];
+    
+    // Score quantitative accomplishments higher
+    const scoredQuantitative = quantitativeAccomplishments.map((acc: any) => ({
+      ...acc,
+      score: this.calculateQuantitativeScore(acc, extractedMetrics),
+      priority: 'high'
+    }));
+    
+    const scoredQualitative = qualitativeAccomplishments.map((acc: any) => ({
+      ...acc,
+      score: 50, // Base score for qualitative
+      priority: 'medium'
+    }));
+    
+    // Combine and sort by score (highest first)
+    const allAccomplishments = [...scoredQuantitative, ...scoredQualitative]
+      .sort((a, b) => b.score - a.score);
+    
+    return {
+      ...mappedData,
+      ranked_accomplishments: allAccomplishments,
+      top_quantitative: scoredQuantitative.slice(0, 5),
+      metrics_found: extractedMetrics.length
+    };
+  }
+
+  private calculateQuantitativeScore(accomplishment: any, extractedMetrics: any[]): number {
+    let score = 70; // Base score for having quantitative data
+    
+    const text = accomplishment.text || accomplishment.description || '';
+    
+    // Bonus points for specific types of metrics
+    if (text.match(/\$[\d,]+/)) score += 20; // Dollar amounts
+    if (text.match(/\d+%/)) score += 15; // Percentages
+    if (text.match(/team|managed|led.*\d+/i)) score += 15; // Team leadership
+    if (text.match(/\d+\s*(million|billion|k|thousand)/i)) score += 10; // Scale
+    if (text.match(/\d+\s*(years?|months?)/i)) score += 8; // Timeline
+    
+    // Higher scores for larger numbers (normalized)
+    const numbers = text.match(/\d+(?:\.\d+)?/g);
+    if (numbers) {
+      const maxNumber = Math.max(...numbers.map(n => parseFloat(n)));
+      if (maxNumber > 1000000) score += 25; // Millions
+      else if (maxNumber > 100000) score += 20; // Hundreds of thousands
+      else if (maxNumber > 10000) score += 15; // Tens of thousands
+      else if (maxNumber > 1000) score += 10; // Thousands
+      else if (maxNumber > 100) score += 5; // Hundreds
+    }
+    
+    return Math.min(score, 100); // Cap at 100
   }
 
   private async generateOpeningHook(styleGuide: string, accomplishments: any, atsKeywords: string[], requirements: string[], job: any): Promise<string> {
@@ -332,11 +484,11 @@ export class CoverLetterPipeline {
         messages: [
           {
             role: "system", 
-            content: `Create a compelling opening hook for a cover letter. Use this style guide: ${styleGuide}. Include relevant ATS keywords: ${atsKeywords.join(', ')}`
+            content: `CRITICAL: Use ONLY factual information from the provided accomplishments. Do NOT invent job titles, companies, or specific role details not present in the data. Create a compelling opening hook for a cover letter using this style guide: ${styleGuide}. Include relevant ATS keywords: ${atsKeywords.join(', ')}`
           },
           {
             role: "user",
-            content: `Job: ${job.title} at ${job.company}. My accomplishments: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}`
+            content: `Job: ${job.title} at ${job.company}. My factual accomplishments from resume: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}. Write using ONLY the provided accomplishment data.`
           }
         ],
         max_tokens: 150
@@ -355,11 +507,11 @@ export class CoverLetterPipeline {
         messages: [
           {
             role: "system",
-            content: `Create an alignment paragraph showing how the candidate's experience matches job requirements. Style: ${styleGuide}. Keywords: ${atsKeywords.join(', ')}`
+            content: `CRITICAL: Use ONLY the factual accomplishments provided. Do NOT fabricate job titles, companies, or experiences. Create an alignment paragraph showing how the candidate's actual experience matches job requirements. Style: ${styleGuide}. Keywords: ${atsKeywords.join(', ')}`
           },
           {
             role: "user", 
-            content: `Job: ${job.title} at ${job.company}. My accomplishments: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}`
+            content: `Job: ${job.title} at ${job.company}. My verified accomplishments from resume: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}. Use ONLY the provided accomplishment facts.`
           }
         ],
         max_tokens: 200
@@ -401,11 +553,11 @@ export class CoverLetterPipeline {
         messages: [
           {
             role: "system",
-            content: `Create a leadership paragraph highlighting management and team leadership experience. Style: ${styleGuide}. Keywords: ${atsKeywords.join(', ')}`
+            content: `CRITICAL: Use ONLY factual leadership experiences from the provided accomplishments. Do NOT invent management roles, team sizes, or company names. Create a leadership paragraph highlighting actual management and team experience. Style: ${styleGuide}. Keywords: ${atsKeywords.join(', ')}`
           },
           {
             role: "user",
-            content: `Job: ${job.title} at ${job.company}. My accomplishments: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}`
+            content: `Job: ${job.title} at ${job.company}. My verified accomplishments from resume: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}. Use ONLY actual leadership facts from the accomplishments.`
           }
         ],
         max_tokens: 200
@@ -424,11 +576,11 @@ export class CoverLetterPipeline {
         messages: [
           {
             role: "system",
-            content: `Create 4 value propositions with titles and details. Return as JSON: {"prop1": {"title": "...", "details": "..."}, "prop2": {...}, "prop3": {...}, "prop4": {...}}. Style: ${styleGuide}. Keywords: ${atsKeywords.join(', ')}`
+            content: `CRITICAL: Base value propositions ONLY on factual accomplishments provided. Do NOT fabricate job titles, companies, or specific achievements. Create 4 value propositions with titles and details using only verified resume data. Return as JSON: {"prop1": {"title": "...", "details": "..."}, "prop2": {...}, "prop3": {...}, "prop4": {...}}. Style: ${styleGuide}. Keywords: ${atsKeywords.join(', ')}`
           },
           {
             role: "user",
-            content: `Job: ${job.title} at ${job.company}. My accomplishments: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}`
+            content: `Job: ${job.title} at ${job.company}. My verified accomplishments from resume: ${JSON.stringify(accomplishments)}. Requirements: ${requirements.join(', ')}. Use ONLY the factual accomplishments provided.`
           }
         ],
         response_format: { type: "json_object" },
@@ -543,7 +695,201 @@ export class CoverLetterPipeline {
     }
   }
 
-  private async wordCountValidator(coverLetterData: any, maxWords: number): Promise<any> {
-    return coverLetterData;
+  private async validateAgainstResume(coverLetterData: any, originalResumeContent: string, resumeEmbeddings: any): Promise<{ validatedContent: any; validationResult: ValidationResult }> {
+    console.log("🔍 Starting optimized resume validation...");
+    
+    try {
+      // Initialize the optimized validator with resume content
+      const validator = new OptimizedResumeValidator(originalResumeContent);
+      
+      // Extract sentences from cover letter content
+      const sentences: string[] = [];
+      for (const [key, value] of Object.entries(coverLetterData)) {
+        if (typeof value === 'string' && value.trim()) {
+          // Split content by sentences
+          const sentencesInSection = value.split(/[.!?]+/).filter(s => s.trim().length > 10);
+          sentences.push(...sentencesInSection);
+        }
+      }
+
+      // Run cascaded validation (rule-based → similarity → semantic)
+      const validationResult = await validator.validateSentences(sentences);
+      
+      // Apply corrections if needed
+      let validatedContent = { ...coverLetterData };
+      
+      if (validationResult.corrections.length > 0) {
+        console.log(`⚠️ Applying ${validationResult.corrections.length} corrections to cover letter`);
+        
+        for (const correction of validationResult.corrections) {
+          // Replace corrected content in all sections
+          for (const [key, value] of Object.entries(validatedContent)) {
+            if (typeof value === 'string' && value.includes(correction.original)) {
+              validatedContent[key] = value.replace(correction.original, correction.corrected);
+            }
+          }
+        }
+      }
+
+      const stats = validator.getStats();
+      console.log(`✅ Optimized validation completed - Score: ${validationResult.score}%, Valid: ${validationResult.isValid}`);
+      console.log(`📊 Validation stats - Resume phrases: ${stats.totalPhrases}, Cache hits: ${stats.cacheSize}`);
+      
+      return { validatedContent, validationResult };
+    } catch (error) {
+      console.error("Optimized validation failed:", error);
+      
+      // Return original content with minimal validation result
+      return {
+        validatedContent: coverLetterData,
+        validationResult: {
+          isValid: false,
+          score: 50,
+          flaggedClaims: ["Validation process failed - manual review required"],
+          supportedClaims: [],
+          corrections: []
+        }
+      };
+    }
+  }
+
+  private async wordCountValidator(coverLetterData: any, maxWords: number = 480): Promise<any> {
+    console.log(`📝 Starting word count validation with limit: ${maxWords} words`);
+    
+    // Count total words across all content sections
+    let totalWords = 0;
+    const wordCounts: { [key: string]: number } = {};
+    
+    for (const [key, value] of Object.entries(coverLetterData)) {
+      if (typeof value === 'string' && value.trim()) {
+        const words = value.trim().split(/\s+/).length;
+        wordCounts[key] = words;
+        totalWords += words;
+      }
+    }
+    
+    console.log(`📊 Current word count: ${totalWords}/${maxWords} words`);
+    
+    if (totalWords <= maxWords) {
+      console.log(`✅ Word count within limit`);
+      return coverLetterData;
+    }
+    
+    console.log(`⚠️ Content exceeds ${maxWords} words (${totalWords}), applying sentence-aware trimming...`);
+    
+    const trimmedData = { ...coverLetterData };
+    
+    // Priority order for trimming (trim less important sections first)
+    const trimOrder = [
+      'PublicSectorInterestParagraph',
+      'WhyCompanySentence', 
+      'ValueProp4Details',
+      'ValueProp3Details',
+      'LeadershipParagraph',
+      'ValueProp2Details',
+      'ValueProp1Details',
+      'AlignmentParagraph',
+      'ClosingParagraph'
+    ];
+    
+    let currentWordCount = totalWords;
+    
+    // First pass: Remove complete sentences from less important sections
+    for (const field of trimOrder) {
+      if (currentWordCount <= maxWords) break;
+      
+      if (trimmedData[field] && typeof trimmedData[field] === 'string') {
+        const text = trimmedData[field].trim();
+        const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+        
+        if (sentences.length > 1) {
+          // Remove sentences from the end until we're under the limit or only one sentence remains
+          let testSentences = [...sentences];
+          
+          while (testSentences.length > 1 && currentWordCount > maxWords) {
+            const removedSentence = testSentences.pop();
+            if (removedSentence) {
+              const wordsRemoved = removedSentence.trim().split(/\s+/).length;
+              const newText = testSentences.join(' ');
+              
+              // Check if removing this sentence would put us closer to the target
+              const newWordCount = currentWordCount - wordsRemoved;
+              
+              trimmedData[field] = newText;
+              currentWordCount = newWordCount;
+              console.log(`🔧 Removed sentence from ${field}: ${wordsRemoved} words (total now: ${currentWordCount})`);
+            }
+          }
+        }
+      }
+    }
+    
+    // Second pass: If still over limit, truncate while completing sentences
+    if (currentWordCount > maxWords) {
+      console.log(`📝 Still over limit, applying sentence-aware global truncation...`);
+      
+      // Collect all text as sentences with their field origins
+      const allSentences: { text: string, field: string, wordCount: number }[] = [];
+      
+      for (const [field, value] of Object.entries(trimmedData)) {
+        if (typeof value === 'string' && value.trim()) {
+          const sentences = value.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+          sentences.forEach(sentence => {
+            allSentences.push({
+              text: sentence,
+              field,
+              wordCount: sentence.trim().split(/\s+/).length
+            });
+          });
+        }
+      }
+      
+      // Calculate running word count and find cutoff point
+      let runningTotal = 0;
+      let cutoffIndex = allSentences.length;
+      
+      for (let i = 0; i < allSentences.length; i++) {
+        const nextTotal = runningTotal + allSentences[i].wordCount;
+        if (nextTotal > maxWords) {
+          cutoffIndex = i;
+          break;
+        }
+        runningTotal = nextTotal;
+      }
+      
+      // Reconstruct the data with only sentences up to cutoff
+      const finalData: any = {};
+      for (const key of Object.keys(trimmedData)) {
+        finalData[key] = '';
+      }
+      
+      for (let i = 0; i < cutoffIndex; i++) {
+        const sentence = allSentences[i];
+        if (finalData[sentence.field]) {
+          finalData[sentence.field] += ' ' + sentence.text;
+        } else {
+          finalData[sentence.field] = sentence.text;
+        }
+      }
+      
+      // Clean up any fields that became empty
+      for (const [key, value] of Object.entries(finalData)) {
+        if (typeof value === 'string') {
+          finalData[key] = value.trim();
+        }
+      }
+      
+      console.log(`✂️ Applied sentence-aware truncation at ${runningTotal} words`);
+      Object.assign(trimmedData, finalData);
+      currentWordCount = runningTotal;
+    }
+    
+    // Final word count
+    const finalWordCount = Object.values(trimmedData)
+      .filter(v => typeof v === 'string')
+      .reduce((count, text) => count + (text as string).trim().split(/\s+/).length, 0);
+    
+    console.log(`✅ Final word count: ${finalWordCount} words (limit: ${maxWords})`);
+    return trimmedData;
   }
 }

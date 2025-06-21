@@ -2,10 +2,20 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Bot } from "lucide-react";
 
 const agents = [
-  { name: "Draft Writer", model: "GPT-4o", status: "ready" },
-  { name: "Critic", model: "Claude", status: "ready" },
-  { name: "Refiner", model: "GPT-4o", status: "ready" },
-  { name: "Quality Check", model: "Claude", status: "ready" },
+  { name: "ATS Keywords", model: "GPT-4o", status: "ready" },
+  { name: "Requirements", model: "GPT-4o", status: "ready" },
+  { name: "Style Guide", model: "Cache", status: "ready" },
+  { name: "Resume", model: "Cache", status: "ready" },
+  { name: "Opening Hook", model: "GPT-4o", status: "ready" },
+  { name: "Alignment", model: "GPT-4o", status: "ready" },
+  { name: "Why Company", model: "GPT-4o", status: "ready" },
+  { name: "Leadership", model: "GPT-4o", status: "ready" },
+  { name: "Value Props", model: "GPT-4o", status: "ready" },
+  { name: "Public Sector", model: "GPT-4o", status: "ready" },
+  { name: "Closing", model: "GPT-4o", status: "ready" },
+  { name: "Resume Validation", model: "Semantic", status: "ready" },
+  { name: "Coherence", model: "Claude", status: "ready" },
+  { name: "Word Count", model: "Validator", status: "ready" },
 ];
 
 interface AgentStatusProps {

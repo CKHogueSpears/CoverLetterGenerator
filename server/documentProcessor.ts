@@ -14,7 +14,7 @@ export async function extractDocumentContent(buffer: Buffer, filename: string): 
         const result = await mammoth.extractRawText({ buffer });
         return result.value;
       } catch (error) {
-        throw new Error(`Failed to process DOCX file: ${error.message}`);
+        throw new Error(`Failed to process DOCX file: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     
     case 'txt':
@@ -50,6 +50,30 @@ export async function createDocxFromContent(content: any): Promise<Buffer> {
   }
 }
 
+function stripMarkdown(text: string): string {
+  if (!text) return text;
+  
+  // Remove **bold** and __bold__
+  text = text.replace(/\*\*(.*?)\*\*/g, "$1");
+  text = text.replace(/__(.*?)__/g, "$1");
+
+  // Remove *italic* and _italic_
+  text = text.replace(/\*(.*?)\*/g, "$1");
+  text = text.replace(/_(.*?)_/g, "$1");
+
+  // Remove headings (# …)
+  text = text.replace(/^#{1,6}\s*/gm, "");
+
+  // Remove backticks
+  text = text.replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ""));
+  text = text.replace(/`([^`]*)`/g, "$1");
+
+  // Convert markdown bullets to simple dashes
+  text = text.replace(/^[\*\-]\s+/gm, "- ");
+  
+  return text;
+}
+
 async function createTemplateBasedDocument(content: any): Promise<Buffer> {
   // Extract content data and map to new template structure
   let data: any = {
@@ -76,47 +100,53 @@ async function createTemplateBasedDocument(content: any): Promise<Buffer> {
   if (content && typeof content === 'object') {
     // Handle new template structure directly
     if (content.HiringManagerOrTeamName) {
-      // New template format - use directly
-      Object.assign(data, content);
+      // New template format - strip markdown from all text fields
+      for (const [key, value] of Object.entries(content)) {
+        if (typeof value === 'string') {
+          data[key] = stripMarkdown(value);
+        } else {
+          data[key] = value;
+        }
+      }
     } else if (content.formatted_cover_letter) {
       // Legacy format - map to new template structure
       const formatted = content.formatted_cover_letter;
       
       data.HiringManagerOrTeamName = "Hiring Team";
-      data.OpeningHookParagraph = formatted.opening_paragraph || "";
-      data.ClosingParagraph = formatted.closing_paragraph || "";
+      data.OpeningHookParagraph = stripMarkdown(formatted.opening_paragraph || "");
+      data.ClosingParagraph = stripMarkdown(formatted.closing_paragraph || "");
       
       // Parse body paragraphs into template sections
       if (formatted.body_paragraphs && Array.isArray(formatted.body_paragraphs)) {
-        data.AlignmentParagraph = formatted.body_paragraphs[0] || "";
+        data.AlignmentParagraph = stripMarkdown(formatted.body_paragraphs[0] || "");
         
         // Handle bullet points as value propositions
         if (formatted.body_paragraphs.length > 2 && Array.isArray(formatted.body_paragraphs[2])) {
           const bullets = formatted.body_paragraphs[2];
           if (bullets[0]) {
             const parts = bullets[0].split(': ');
-            data.ValueProp1Title = parts[0] || "Strategic Compliance Leadership";
-            data.ValueProp1Details = parts[1] || bullets[0];
+            data.ValueProp1Title = stripMarkdown(parts[0] || "Strategic Compliance Leadership");
+            data.ValueProp1Details = stripMarkdown(parts[1] || bullets[0]);
           }
           if (bullets[1]) {
             const parts = bullets[1].split(': ');
-            data.ValueProp2Title = parts[0] || "Risk Management";
-            data.ValueProp2Details = parts[1] || bullets[1];
+            data.ValueProp2Title = stripMarkdown(parts[0] || "Risk Management");
+            data.ValueProp2Details = stripMarkdown(parts[1] || bullets[1]);
           }
           if (bullets[2]) {
             const parts = bullets[2].split(': ');
-            data.ValueProp3Title = parts[0] || "Governance and Policy Development";
-            data.ValueProp3Details = parts[1] || bullets[2];
+            data.ValueProp3Title = stripMarkdown(parts[0] || "Governance and Policy Development");
+            data.ValueProp3Details = stripMarkdown(parts[1] || bullets[2]);
           }
           if (bullets[3]) {
             const parts = bullets[3].split(': ');
-            data.ValueProp4Title = parts[0] || "Team Leadership";
-            data.ValueProp4Details = parts[1] || bullets[3];
+            data.ValueProp4Title = stripMarkdown(parts[0] || "Team Leadership");
+            data.ValueProp4Details = stripMarkdown(parts[1] || bullets[3]);
           }
         }
         
         if (formatted.body_paragraphs.length > 3) {
-          data.LeadershipParagraph = formatted.body_paragraphs[3] || "";
+          data.LeadershipParagraph = stripMarkdown(formatted.body_paragraphs[3] || "");
         }
       }
     }
@@ -125,16 +155,24 @@ async function createTemplateBasedDocument(content: any): Promise<Buffer> {
   // Create document using the new template structure
   const paragraphs: Paragraph[] = [];
   
-  // Salutation
-  paragraphs.push(new Paragraph({
-    children: [new TextRun(`Dear ${data.HiringManagerOrTeamName},`)],
-    spacing: { after: 240 }
-  }));
-  
-  // Opening Hook
-  if (data.OpeningHookParagraph) {
+  // Check if OpeningHookParagraph already starts with "Dear "
+  const opening = data.OpeningHookParagraph?.trim() || "";
+  const hasDear = 
+    opening.toLowerCase().startsWith("dear ") ||
+    opening.toLowerCase().startsWith("dear\t") ||
+    opening.toLowerCase().startsWith("dear\n");
+
+  if (!hasDear) {
+    // Only add a salutation if "Dear …" is not already inside OpeningHookParagraph
     paragraphs.push(new Paragraph({
-      children: [new TextRun(data.OpeningHookParagraph)],
+      children: [new TextRun(`Dear ${data.HiringManagerOrTeamName},`)],
+      spacing: { after: 240 }
+    }));
+  }
+
+  if (opening) {
+    paragraphs.push(new Paragraph({
+      children: [new TextRun(opening)],
       spacing: { after: 240 }
     }));
   }
@@ -233,8 +271,15 @@ async function createTemplateBasedDocument(content: any): Promise<Buffer> {
     }]
   });
 
-  const buffer = await Packer.toBuffer(doc);
-  console.log("📄 Professional template document created:", paragraphs.length, "paragraphs,", buffer.length, "bytes");
+  let buffer: Buffer;
+  try {
+    buffer = await Packer.toBuffer(doc);
+    console.log("📄 Professional template document created:", paragraphs.length, "paragraphs,", buffer.length, "bytes");
+  } catch (err) {
+    console.error("❌ DOCX generation failed in createTemplateBasedDocument");
+    console.error("Error details:", err);
+    throw new Error(`Document generation error: ${(err as Error).message}`);
+  }
   
   return buffer;
 }
@@ -259,8 +304,15 @@ async function createBasicDocument(content: any): Promise<Buffer> {
     }]
   });
 
-  const buffer = await Packer.toBuffer(doc);
-  console.log("📄 Basic document created:", paragraphs.length, "paragraphs,", buffer.length, "bytes");
+  let buffer: Buffer;
+  try {
+    buffer = await Packer.toBuffer(doc);
+    console.log("📄 Basic document created:", paragraphs.length, "paragraphs,", buffer.length, "bytes");
+  } catch (err) {
+    console.error("❌ DOCX generation failed in createBasicDocument");
+    console.error("Error details:", err);
+    throw new Error(`Basic document generation error: ${(err as Error).message}`);
+  }
   
   return buffer;
 }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "@/lib/queryClient";
 import DocumentUpload from "@/components/document-upload";
 import JobDescriptionForm from "@/components/job-description-form";
 import PipelineStatus from "@/components/pipeline-status";
@@ -10,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { FileText, Shield, Star, LogOut } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
+import { apiKeyManager } from "@/lib/apiKeyManager";
+import { apiRequest } from "@/lib/queryClient";
 
 export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -25,21 +28,21 @@ export default function Home() {
     }
   };
 
-  const { data: documents } = useQuery({
+  const { data: documents = [] } = useQuery({
     queryKey: ["/api/documents"],
   });
 
-  const { data: jobDescriptions } = useQuery({
+  const { data: jobDescriptions = [] } = useQuery({
     queryKey: ["/api/job-descriptions"],
   });
 
-  const { data: coverLetters } = useQuery({
+  const { data: coverLetters = [] } = useQuery({
     queryKey: ["/api/cover-letters"],
   });
 
-  const hasStyleGuide = documents?.some((doc: any) => doc.type === "style_guide");
-  const hasResume = documents?.some((doc: any) => doc.type === "resume");
-  const hasJobDescription = jobDescriptions?.length > 0;
+  const hasStyleGuide = Array.isArray(documents) ? documents.some((doc: any) => doc.type === "style_guide") : false;
+  const hasResume = Array.isArray(documents) ? documents.some((doc: any) => doc.type === "resume") : false;
+  const hasJobDescription = Array.isArray(jobDescriptions) ? jobDescriptions.length > 0 : false;
 
   const canGenerate = hasStyleGuide && hasResume && hasJobDescription;
 
@@ -48,19 +51,28 @@ export default function Home() {
 
     try {
       setIsGenerating(true);
-      const response = await fetch("/api/cover-letters/generate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jobDescriptionId: jobDescriptions[0].id,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to start generation");
+      
+      let apiKeys: { openai?: string; anthropic?: string } | undefined;
+      
+      // In production (deployed to Replit), prompt for API keys
+      if (apiKeyManager.isProductionMode()) {
+        const keys = apiKeyManager.promptForKeysOnGenerate();
+        if (!keys) {
+          // User cancelled or didn't provide keys
+          setIsGenerating(false);
+          return;
+        }
+        apiKeys = keys;
       }
+      
+      const response = await apiRequest(
+        "POST",
+        "/api/cover-letters/generate",
+        {
+          jobDescriptionId: (jobDescriptions as any[])[0]?.id,
+        },
+        apiKeys
+      );
 
       const result = await response.json();
       setCurrentCoverLetterId(result.coverLetterId);
@@ -73,6 +85,8 @@ export default function Home() {
   const handleGenerationComplete = () => {
     setIsGenerating(false);
     setCurrentCoverLetterId(null);
+    // Refresh the cover letters list to show the new one
+    queryClient.invalidateQueries({ queryKey: ["/api/cover-letters"] });
   };
 
   return (
@@ -178,9 +192,20 @@ export default function Home() {
                             <p className="text-sm font-medium text-gray-900">
                               Cover Letter #{letter.id}
                             </p>
-                            <p className="text-xs text-secondary">
-                              {letter.qualityScore ? `${letter.qualityScore}% quality` : 'Processing...'}
-                            </p>
+                            <div className="text-xs text-secondary space-y-1">
+                              {letter.qualityScore ? (
+                                <>
+                                  <div>{letter.qualityScore}% quality</div>
+                                  {letter.validationScore && (
+                                    <div className={`${letter.validationScore >= 90 ? 'text-green-600' : letter.validationScore >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                      {letter.validationScore}% accuracy
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                'Processing...'
+                              )}
+                            </div>
                           </div>
                         </div>
                         {letter.qualityScore && (

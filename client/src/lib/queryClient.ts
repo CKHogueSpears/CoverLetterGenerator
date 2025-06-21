@@ -11,10 +11,23 @@ export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
+  apiKeys?: { openai?: string; anthropic?: string },
 ): Promise<Response> {
+  const headers: Record<string, string> = data ? { "Content-Type": "application/json" } : {};
+  
+  // Add API keys to headers if provided (for production mode)
+  if (apiKeys) {
+    if (apiKeys.openai) {
+      headers["X-OpenAI-Key"] = apiKeys.openai;
+    }
+    if (apiKeys.anthropic) {
+      headers["X-Anthropic-Key"] = apiKeys.anthropic;
+    }
+  }
+
   const res = await fetch(url, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers,
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });

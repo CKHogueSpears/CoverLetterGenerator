@@ -48,6 +48,8 @@ export const coverLetters = pgTable("cover_letters", {
   styleScore: integer("style_score"),
   clarityScore: integer("clarity_score"),
   impactScore: integer("impact_score"),
+  validationScore: integer("validation_score"),
+  validationResult: jsonb("validation_result"),
   status: text("status").notNull(), // 'draft' | 'refining' | 'completed' | 'failed'
   iterations: integer("iterations").default(0),
   generatedAt: timestamp("generated_at").defaultNow(),

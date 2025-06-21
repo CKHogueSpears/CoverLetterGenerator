@@ -31,19 +31,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   const httpServer = createServer(app);
 
-  // Mock user for demo purposes (in production, use proper authentication)
-  const DEFAULT_USER_ID = 1;
-
-  // Ensure default user exists
-  app.use(async (req, res, next) => {
+  // Session-based user management for production isolation
+  app.use(async (req: any, res, next) => {
     try {
-      let user = await storage.getUser(DEFAULT_USER_ID);
-      if (!user) {
-        user = await storage.createUser({
-          username: "demo_user",
-          password: "password123"
-        });
+      const hostname = req.get('host') || '';
+      const isProduction = hostname.includes('replit.dev') || hostname.includes('repl.co') || hostname.includes('.replit.app');
+      
+      console.log(`🏠 Session management - Hostname: ${hostname}, Production: ${isProduction}`);
+      
+      if (isProduction) {
+        // In production, create unique user per session with timestamp to ensure isolation
+        if (!req.session.userId) {
+          // Generate truly unique user ID with timestamp to prevent data leakage
+          const timestamp = Date.now();
+          const uniqueId = `session_${req.sessionID}_${timestamp}`.slice(0, 50);
+          
+          // Always create a new user for each session to ensure isolation
+          const user = await storage.createUser({
+            username: uniqueId,
+            password: "session_user"
+          });
+          
+          req.session.userId = user.id;
+          req.session.save();
+          
+          // Clear any cached data for this new session
+          invalidateUserCaches(user.id);
+        }
+        req.userId = req.session.userId;
+      } else {
+        // In development, use default user (for testing consistency)
+        const DEFAULT_USER_ID = 1;
+        let user = await storage.getUser(DEFAULT_USER_ID);
+        if (!user) {
+          user = await storage.createUser({
+            username: "demo_user",
+            password: "password123"
+          });
+        }
+        req.userId = DEFAULT_USER_ID;
       }
+      
       next();
     } catch (error) {
       next(error);
@@ -53,6 +81,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Upload documents (style guide or resume)
   app.post("/api/documents/upload", upload.single("file"), async (req, res) => {
     try {
+      // Check if userId is available from session management
+      if (!(req as any).userId) {
+        console.error("Upload failed: No userId in session");
+        return res.status(401).json({ message: "Session not initialized. Please refresh the page and try again." });
+      }
+
       if (!req.file) {
         return res.status(400).json({ message: "No file uploaded" });
       }
@@ -73,28 +107,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Save to database
       const document = await storage.createDocument({
-        userId: DEFAULT_USER_ID,
+        userId: (req as any).userId,
         type,
         filename: req.file.originalname,
         content,
       });
 
       // Invalidate caches when new documents are uploaded
-      invalidateUserCaches(DEFAULT_USER_ID);
+      invalidateUserCaches((req as any).userId);
 
       res.json(document);
     } catch (error) {
       console.error("Upload error:", error);
-      res.status(500).json({ message: error.message });
+      res.status(500).json({ message: error instanceof Error ? error.message : "Upload failed" });
     }
   });
 
   // Get uploaded documents
   app.get("/api/documents", async (req, res) => {
     try {
-      const documents = await storage.getDocumentsByUserId(DEFAULT_USER_ID);
+      const documents = await storage.getDocumentsByUserId((req as any).userId);
       res.json(documents);
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
@@ -105,7 +139,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const documentId = parseInt(req.params.id);
       await storage.deleteDocument(documentId);
       res.json({ message: "Document deleted successfully" });
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
@@ -115,12 +149,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const validatedData = insertJobDescriptionSchema.parse({
         ...req.body,
-        userId: DEFAULT_USER_ID,
+        userId: (req as any).userId,
       });
 
       const jobDescription = await storage.createJobDescription(validatedData);
       res.json(jobDescription);
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ message: "Validation error", errors: error.errors });
       }
@@ -131,9 +165,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get job descriptions
   app.get("/api/job-descriptions", async (req, res) => {
     try {
-      const jobDescriptions = await storage.getJobDescriptionsByUserId(DEFAULT_USER_ID);
+      const jobDescriptions = await storage.getJobDescriptionsByUserId((req as any).userId);
       res.json(jobDescriptions);
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
@@ -147,9 +181,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Job description ID is required" });
       }
 
+      // Extract API keys from headers (for production mode)
+      const userApiKeys = {
+        openai: req.headers['x-openai-key'] as string,
+        anthropic: req.headers['x-anthropic-key'] as string,
+      };
+
+      // Check if we're in production mode by checking the request hostname
+      const hostname = req.get('host') || '';
+      const isProduction = hostname.includes('.replit.app');
+      
+      console.log(`🔍 Hostname: ${hostname}, Production mode: ${isProduction}`);
+      
+      // In production, require at least one API key
+      if (isProduction && !userApiKeys.openai && !userApiKeys.anthropic) {
+        return res.status(400).json({ 
+          message: "API keys are required in production mode. Please provide OpenAI or Anthropic API key." 
+        });
+      }
+
       // Create cover letter record
       const coverLetter = await storage.createCoverLetter({
-        userId: DEFAULT_USER_ID,
+        userId: (req as any).userId,
         jobDescriptionId,
         content: null,
         qualityScore: 0,
@@ -170,8 +223,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         agentLogs: {},
       });
 
-      // Start pipeline in background
-      const pipeline = new CoverLetterPipeline(coverLetter.id);
+      // Start pipeline in background with user API keys
+      const pipeline = new CoverLetterPipeline(coverLetter.id, undefined, userApiKeys);
       pipeline.execute().catch(console.error);
 
       res.json({ 
@@ -207,9 +260,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get cover letters
   app.get("/api/cover-letters", async (req, res) => {
     try {
-      const coverLetters = await storage.getCoverLettersByUserId(DEFAULT_USER_ID);
+      const coverLetters = await storage.getCoverLettersByUserId((req as any).userId);
       res.json(coverLetters);
-    } catch (error) {
+    } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
@@ -290,6 +343,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ success: true, message: "Cover letter generation stopped" });
     } catch (error: any) {
       console.error("Stop generation error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get validation details for a cover letter
+  app.get("/api/cover-letters/:id/validation", async (req, res) => {
+    try {
+      const coverLetterId = parseInt(req.params.id);
+      const coverLetter = await storage.getCoverLetter(coverLetterId);
+
+      if (!coverLetter) {
+        return res.status(404).json({ message: "Cover letter not found" });
+      }
+
+      res.json({
+        validationScore: coverLetter.validationScore,
+        validationResult: coverLetter.validationResult
+      });
+    } catch (error: any) {
+      console.error("Get validation details error:", error);
       res.status(500).json({ error: error.message });
     }
   });
